@@ -182,6 +182,9 @@ pub fn zellij_server_listener(
                         match msg.map(|m| m.0) {
                             Some(ServerToClientMsg::UnblockInputThread) => {},
                             Some(ServerToClientMsg::Connected) => {},
+                            // Local attachment handoff is not a web-client API.
+                            Some(ServerToClientMsg::VerijAttachmentIdentity { .. }) => {},
+                            Some(ServerToClientMsg::VerijPaneResult(_)) => {},
                             Some(ServerToClientMsg::CliPipeOutput { .. } ) => {},
                             Some(ServerToClientMsg::UnblockCliPipeInput { .. } ) => {},
                             Some(ServerToClientMsg::StartWebServer { .. } ) => {},

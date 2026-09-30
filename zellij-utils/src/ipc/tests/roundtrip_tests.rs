@@ -30,6 +30,79 @@ use std::path::PathBuf;
 const ROUNDTRIP_TEST_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 #[test]
+fn verij_bridge_wire_roundtrip() {
+    use crate::client_server_contract::client_server_contract::{
+        ClientToServerMsg as ProtoClient, ServerToClientMsg as ProtoServer,
+    };
+    use prost::Message;
+    for original in [
+        ClientToServerMsg::VerijRequestIdentity,
+        ClientToServerMsg::VerijFocusPane {
+            target_client_id: 42,
+            connection_id: "attachment-generation".into(),
+            pane_id: 7,
+        },
+    ] {
+        let wire = ProtoClient::from(original.clone()).encode_to_vec();
+        let decoded: ClientToServerMsg = ProtoClient::decode(wire.as_slice())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(original, decoded);
+    }
+    let original = ServerToClientMsg::VerijAttachmentIdentity {
+        client_id: 42,
+        connection_id: "attachment-generation".into(),
+        server_pid: 12345,
+    };
+    let wire = ProtoServer::from(original.clone()).encode_to_vec();
+    let decoded: ServerToClientMsg = ProtoServer::decode(wire.as_slice())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(original, decoded);
+}
+
+#[test]
+fn verij_completion_wire_roundtrip_preserves_zero_focus_and_correlation() {
+    use crate::client_server_contract::client_server_contract::{
+        ClientToServerMsg as ProtoClient, ServerToClientMsg as ProtoServer,
+    };
+    use crate::ipc::{VerijPaneRequest, VerijPaneResult};
+    use prost::Message;
+    let request = VerijPaneRequest {
+        request_id: "request-42".into(),
+        target_client_id: 7,
+        connection_id: "generation".into(),
+        pane_id: 0,
+        sequence: u64::MAX,
+        query_only: false,
+    };
+    let original = ClientToServerMsg::VerijPaneRequest(request.clone());
+    let wire = ProtoClient::from(original.clone()).encode_to_vec();
+    let decoded: ClientToServerMsg = ProtoClient::decode(wire.as_slice())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(original, decoded);
+    for observation in [Some(0), None] {
+        let mut result = VerijPaneResult::new(request.clone(), "focused");
+        result.focused_pane_id = observation;
+        result.tab_id = observation.map(u64::from);
+        let original = ServerToClientMsg::VerijPaneResult(result);
+        let wire = ProtoServer::from(original.clone()).encode_to_vec();
+        let decoded: ServerToClientMsg = ProtoServer::decode(wire.as_slice())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            original, decoded,
+            "absent and zero IDs must remain distinct"
+        );
+    }
+}
+
+#[test]
 fn server_client_contract() {
     std::thread::Builder::new()
         .stack_size(ROUNDTRIP_TEST_STACK_SIZE)

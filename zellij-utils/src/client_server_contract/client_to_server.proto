@@ -32,11 +32,29 @@ message ClientToServerMsg {
     RequestSessionListMsg request_session_list = 25;
     SetMobileRenderPreferencesMsg set_mobile_render_preferences = 26;
     HostTerminalFocusChangedMsg host_terminal_focus_changed = 27;
+    VerijRequestIdentityMsg verij_request_identity = 28;
+    VerijFocusPaneMsg verij_focus_pane = 29;
+    VerijPaneRequestMsg verij_pane_request = 30;
   }
 }
 
 message DetachSessionMsg {
   repeated uint32 client_ids = 1;
+}
+
+message VerijRequestIdentityMsg {}
+message VerijPaneRequestMsg {
+  string request_id = 1;
+  uint32 target_client_id = 2;
+  string connection_id = 3;
+  uint32 pane_id = 4;
+  uint64 sequence = 5;
+  bool query_only = 6;
+}
+message VerijFocusPaneMsg {
+  uint32 target_client_id = 1;
+  string connection_id = 2;
+  uint32 pane_id = 3;
 }
 
 message TerminalPixelDimensionsMsg {

@@ -244,6 +244,49 @@ pub enum ClientToServerMsg {
     HostTerminalFocusChanged {
         focused: bool,
     },
+    VerijRequestIdentity,
+    VerijFocusPane {
+        target_client_id: ClientId,
+        connection_id: String,
+        pane_id: u32,
+    },
+    VerijPaneRequest(VerijPaneRequest),
+}
+
+/// Experimental local bridge request. Sequences increase per display generation;
+/// queries use zero and do not supersede navigation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct VerijPaneRequest {
+    pub request_id: String,
+    pub target_client_id: ClientId,
+    pub connection_id: String,
+    pub pane_id: u32,
+    pub sequence: u64,
+    pub query_only: bool,
+}
+
+/// A screen-thread observation, not proof of host Workspace keyboard focus.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct VerijPaneResult {
+    pub request: VerijPaneRequest,
+    pub status: String,
+    pub focused_pane_id: Option<u32>,
+    pub focused_is_plugin: bool,
+    pub tab_id: Option<u64>,
+    pub server_pid: u32,
+}
+
+impl VerijPaneResult {
+    pub fn new(request: VerijPaneRequest, status: &str) -> Self {
+        Self {
+            request,
+            status: status.into(),
+            focused_pane_id: None,
+            focused_is_plugin: false,
+            tab_id: None,
+            server_pid: std::process::id(),
+        }
+    }
 }
 
 // Types of messages sent from the server to the client
@@ -302,6 +345,12 @@ pub enum ServerToClientMsg {
     MobileState {
         payload: MobileStatePayload,
     },
+    VerijAttachmentIdentity {
+        client_id: ClientId,
+        connection_id: String,
+        server_pid: u32,
+    },
+    VerijPaneResult(VerijPaneResult),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

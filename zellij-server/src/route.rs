@@ -2686,6 +2686,19 @@ pub(crate) fn route_thread_main(
                             let _ = to_server.send(ServerInstruction::ConnStatus(client_id));
                             should_break = true;
                         },
+                        ClientToServerMsg::VerijRequestIdentity => {
+                            to_server.send(ServerInstruction::VerijRequestIdentity(client_id)).with_context(err_context)?;
+                        },
+                        ClientToServerMsg::VerijFocusPane { target_client_id, connection_id, pane_id } => {
+                            to_server.send(ServerInstruction::VerijFocusPane(client_id, target_client_id, connection_id, pane_id)).with_context(err_context)?;
+                            should_break = true;
+                        },
+                        ClientToServerMsg::VerijPaneRequest(request) => {
+                            to_server.send(ServerInstruction::VerijPaneRequest(client_id, request)).with_context(err_context)?;
+                            // Keep the IPC route alive until the asynchronous
+                            // screen result is delivered and the helper closes.
+                            // Exiting now would enqueue RemoveClient too early.
+                        },
                         ClientToServerMsg::DetachSession { client_ids } => {
                             let _ =
                                 to_server.send(ServerInstruction::DetachSession(client_ids, None));

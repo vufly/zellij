@@ -3068,7 +3068,7 @@ impl ThemeHue {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServerMsg {
-    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27")]
+    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30")]
     pub message: ::core::option::Option<client_to_server_msg::Message>,
 }
 /// Nested message and enum types in `ClientToServerMsg`.
@@ -3130,6 +3130,12 @@ pub mod client_to_server_msg {
         SetMobileRenderPreferences(super::SetMobileRenderPreferencesMsg),
         #[prost(message, tag="27")]
         HostTerminalFocusChanged(super::HostTerminalFocusChangedMsg),
+        #[prost(message, tag="28")]
+        VerijRequestIdentity(super::VerijRequestIdentityMsg),
+        #[prost(message, tag="29")]
+        VerijFocusPane(super::VerijFocusPaneMsg),
+        #[prost(message, tag="30")]
+        VerijPaneRequest(super::VerijPaneRequestMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3137,6 +3143,47 @@ pub mod client_to_server_msg {
 pub struct DetachSessionMsg {
     #[prost(uint32, repeated, tag="1")]
     pub client_ids: ::prost::alloc::vec::Vec<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VerijRequestIdentityMsg {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VerijPaneRequestMsg {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub target_client_id: u32,
+    #[prost(string, tag="3")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag="4")]
+    pub pane_id: u32,
+    #[prost(uint64, tag="5")]
+    pub sequence: u64,
+    #[prost(bool, tag="6")]
+    pub query_only: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VerijPaneResultMsg {
+    #[prost(message, optional, tag="1")]
+    pub request: ::core::option::Option<VerijPaneRequestMsg>,
+    #[prost(string, tag="2")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(uint32, optional, tag="3")]
+    pub focused_pane_id: ::core::option::Option<u32>,
+    #[prost(bool, tag="4")]
+    pub focused_is_plugin: bool,
+    #[prost(uint64, optional, tag="5")]
+    pub tab_id: ::core::option::Option<u64>,
+    #[prost(uint32, tag="6")]
+    pub server_pid: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VerijFocusPaneMsg {
+    #[prost(uint32, tag="1")]
+    pub target_client_id: u32,
+    #[prost(string, tag="2")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag="3")]
+    pub pane_id: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3347,7 +3394,7 @@ impl HostTerminalThemeIndication {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClientMsg {
-    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19")]
+    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21")]
     pub message: ::core::option::Option<server_to_client_msg::Message>,
 }
 /// Nested message and enum types in `ServerToClientMsg`.
@@ -3393,6 +3440,10 @@ pub mod server_to_client_msg {
         EmitNestedSessionFrame(super::EmitNestedSessionFrameMsg),
         #[prost(message, tag="19")]
         MobileState(super::MobileStateMsg),
+        #[prost(message, tag="20")]
+        VerijAttachmentIdentity(super::VerijAttachmentIdentityMsg),
+        #[prost(message, tag="21")]
+        VerijPaneResult(super::VerijPaneResultMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3400,6 +3451,15 @@ pub mod server_to_client_msg {
 pub struct RenderMsg {
     #[prost(string, tag="1")]
     pub content: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VerijAttachmentIdentityMsg {
+    #[prost(uint32, tag="1")]
+    pub client_id: u32,
+    #[prost(string, tag="2")]
+    pub connection_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag="3")]
+    pub server_pid: u32,
 }
 /// Empty message
 #[allow(clippy::derive_partial_eq_without_eq)]

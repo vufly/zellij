@@ -34,6 +34,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::str;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::route::NotificationEnd;
@@ -58,7 +59,8 @@ use zellij_utils::input::options::{
 };
 use zellij_utils::ipc::{
     ExitReason, MobileActivePanePayload, MobilePanePayload, MobileSessionPayload,
-    MobileSizePayload, MobileStatePayload, MobileTabPayload, ServerToClientMsg,
+    MobileSizePayload, MobileStatePayload, MobileTabPayload, ServerToClientMsg, VerijPaneRequest,
+    VerijPaneResult,
 };
 use zellij_utils::pane_size::{PaneGeom, Size, SizeInPixels};
 use zellij_utils::shared::{clean_string_from_control_and_linebreak, detect_theme_hue};
@@ -97,7 +99,7 @@ use crate::{
     tab::{GuestChoiceIndicator, SuppressedPanes, Tab},
     thread_bus::Bus,
     ui::loading_indication::LoadingIndication,
-    ClientId, ServerInstruction,
+    ClientId, ServerInstruction, SessionState,
 };
 use zellij_utils::{
     data::{Event, InputMode, ModeInfo, Palette, PaletteColor, PluginCapabilities, Style},
@@ -108,6 +110,14 @@ use zellij_utils::{
 };
 
 use crate::mobile_web::MobileWebPrefs;
+
+#[derive(Debug, Clone)]
+pub struct VerijPaneTask {
+    pub(crate) requester: ClientId,
+    pub(crate) requester_generation: String,
+    pub(crate) request: VerijPaneRequest,
+    pub(crate) state: Arc<RwLock<SessionState>>,
+}
 
 /// Parses a namespaced OSC 99 response and extracts the original pane ID
 /// and un-namespaced response bytes.
@@ -751,6 +761,9 @@ pub enum ScreenInstruction {
     UnsuppressPane(PaneId, bool), // bool -> should float if hidden
     UnsuppressOrExpandPane(PaneId, bool), // bool -> should float if hidden
     FocusPaneWithId(PaneId, bool, bool, ClientId, Option<NotificationEnd>), // bools:
+    VerijSetClientGeneration(ClientId, String),
+    VerijFocusPane(PaneId, ClientId, String),
+    VerijPaneRequest(VerijPaneTask),
     // should_float_if_hidden,
     // should_be_in_place_if_hidden
     RenamePane(PaneId, Vec<u8>, Option<NotificationEnd>),
@@ -1192,6 +1205,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::UnsuppressPane(..) => ScreenContext::UnsuppressPane,
             ScreenInstruction::UnsuppressOrExpandPane(..) => ScreenContext::UnsuppressOrExpandPane,
             ScreenInstruction::FocusPaneWithId(..) => ScreenContext::FocusPaneWithId,
+            ScreenInstruction::VerijSetClientGeneration(..) => ScreenContext::FocusPaneWithId,
+            ScreenInstruction::VerijFocusPane(..) => ScreenContext::FocusPaneWithId,
+            ScreenInstruction::VerijPaneRequest(..) => ScreenContext::FocusPaneWithId,
             ScreenInstruction::RenamePane(..) => ScreenContext::RenamePane,
             ScreenInstruction::RenameActivePane(..) => ScreenContext::RenameActivePane,
             ScreenInstruction::RenameTab(..) => ScreenContext::RenameTab,
@@ -1631,6 +1647,7 @@ pub(crate) struct Screen {
     client_notification_protocols: HashMap<ClientId, NotificationProtocol>,
     host_notification_protocol: HostNotificationProtocol,
     client_host_terminal_env: HashMap<ClientId, BTreeMap<String, String>>,
+    verij_client_generations: HashMap<ClientId, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1838,6 +1855,7 @@ impl Screen {
             client_notification_protocols: HashMap::new(),
             host_notification_protocol: HostNotificationProtocol::default(),
             client_host_terminal_env: HashMap::new(),
+            verij_client_generations: HashMap::new(),
         }
     }
 
@@ -5191,6 +5209,7 @@ impl Screen {
         self.client_host_focused.remove(&client_id);
         self.client_notification_protocols.remove(&client_id);
         self.client_host_terminal_env.remove(&client_id);
+        self.verij_client_generations.remove(&client_id);
         self.revert_fit_disabled_without_reference_client()
             .with_context(err_context)?;
         if let Some(prev_tab_id) = previously_active_tab_id {
@@ -11196,6 +11215,120 @@ pub(crate) fn screen_thread_main(
                         screen.log_and_report_session_state()?;
                     }
                 }
+            },
+            ScreenInstruction::VerijSetClientGeneration(client_id, generation) => {
+                // The initial tab finishes asynchronously. Store the server-
+                // verified generation now; require connected presence at focus.
+                screen
+                    .verij_client_generations
+                    .insert(client_id, generation);
+            },
+            ScreenInstruction::VerijFocusPane(pane_id, client_id, generation) => {
+                // Revalidate on the screen thread, not merely when enqueuing.
+                // An attachment can be replaced while focus is queued.
+                if screen.verij_client_generations.get(&client_id) == Some(&generation)
+                    && screen.connected_clients.borrow().contains_key(&client_id)
+                    && screen
+                        .tabs
+                        .values()
+                        .any(|tab| tab.has_pane_with_pid(&pane_id))
+                {
+                    screen.focus_pane_with_id(pane_id, false, false, client_id)?;
+                    screen.clear_bell_for_pane_id(pane_id, client_id);
+                    screen.reconcile_single_pane_focus(client_id);
+                    screen.sync_scroll_mode_on_focus(client_id)?;
+                    screen.log_and_report_session_state()?;
+                }
+            },
+            ScreenInstruction::VerijPaneRequest(VerijPaneTask {
+                requester,
+                requester_generation,
+                request,
+                state,
+            }) => {
+                let result = {
+                    // Recheck the live registry at execution start. Release its
+                    // lock before native focus: cross-tab focus can send Render
+                    // to the bounded server queue, whose consumer may need a
+                    // registry write lock. Screen mutations are serialized here;
+                    // a later reservation is rechecked at result delivery.
+                    let validation = {
+                        let state = state.read().unwrap();
+                        if !state.verij_validate_requester(requester, &requester_generation) {
+                            Err("cancelled")
+                        } else {
+                            state.verij_validate_execution(&request)
+                        }
+                    };
+                    let mut result = VerijPaneResult::new(request.clone(), "unavailable");
+                    if let Err(status) = validation {
+                        result.status = status.into();
+                    } else if !screen
+                        .connected_clients
+                        .borrow()
+                        .contains_key(&request.target_client_id)
+                    {
+                        result.status = "unavailable".into();
+                    } else {
+                        let target = PaneId::Terminal(request.pane_id);
+                        let exists = screen.pane_exists(&target);
+                        let focus_ok = request.query_only
+                            || !exists
+                            || screen
+                                .focus_pane_with_id(target, false, false, request.target_client_id)
+                                .is_ok();
+                        if let Some(tab_id) = screen.active_tab_ids.get(&request.target_client_id) {
+                            result.tab_id = Some(*tab_id as u64);
+                            if let Some(pane) = screen
+                                .tabs
+                                .get(tab_id)
+                                .and_then(|tab| tab.get_active_pane_id(request.target_client_id))
+                            {
+                                match pane {
+                                    PaneId::Terminal(id) => result.focused_pane_id = Some(id),
+                                    PaneId::Plugin(id) => {
+                                        result.focused_pane_id = Some(id);
+                                        result.focused_is_plugin = true;
+                                    },
+                                }
+                            }
+                        }
+                        result.status = if !exists {
+                            "pane_missing"
+                        } else if !focus_ok {
+                            "focus_failed"
+                        } else if result.focused_pane_id == Some(request.pane_id)
+                            && !result.focused_is_plugin
+                        {
+                            "focused"
+                        } else {
+                            "not_focused"
+                        }
+                        .into();
+                    }
+                    result
+                };
+                if !request.query_only && result.status == "focused" {
+                    screen.clear_bell_for_pane_id(
+                        PaneId::Terminal(request.pane_id),
+                        request.target_client_id,
+                    );
+                    screen.reconcile_single_pane_focus(request.target_client_id);
+                    screen
+                        .sync_scroll_mode_on_focus(request.target_client_id)
+                        .non_fatal();
+                    screen.render(None).non_fatal();
+                    screen.log_and_report_session_state().non_fatal();
+                }
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::VerijPaneResult(
+                        requester,
+                        requester_generation,
+                        result,
+                    ))
+                    .non_fatal();
             },
             ScreenInstruction::RenamePane(
                 pane_id,

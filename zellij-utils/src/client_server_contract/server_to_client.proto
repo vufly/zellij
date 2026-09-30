@@ -2,6 +2,7 @@ syntax = "proto3";
 package client_server_contract;
 
 import "common_types.proto";
+import "client_to_server.proto";
 
 message ServerToClientMsg {
   oneof message {
@@ -24,11 +25,28 @@ message ServerToClientMsg {
     SetSoftKeyboardMsg set_soft_keyboard = 17;
     EmitNestedSessionFrameMsg emit_nested_session_frame = 18;
     MobileStateMsg mobile_state = 19;
+    VerijAttachmentIdentityMsg verij_attachment_identity = 20;
+    VerijPaneResultMsg verij_pane_result = 21;
   }
 }
 
 message RenderMsg {
   string content = 1;
+}
+
+message VerijAttachmentIdentityMsg {
+  uint32 client_id = 1;
+  string connection_id = 2;
+  uint32 server_pid = 3;
+}
+
+message VerijPaneResultMsg {
+  VerijPaneRequestMsg request = 1;
+  string status = 2;
+  optional uint32 focused_pane_id = 3;
+  bool focused_is_plugin = 4;
+  optional uint64 tab_id = 5;
+  uint32 server_pid = 6;
 }
 
 message UnblockInputThreadMsg {

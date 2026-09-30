@@ -27,6 +27,7 @@ mod session_layout_metadata;
 mod terminal_bytes;
 mod thread_bus;
 mod ui;
+mod verij_bridge;
 
 use background_jobs::{background_jobs_main, BackgroundJob};
 use log::info;
@@ -75,11 +76,14 @@ use zellij_utils::{
         options::Options,
         plugins::PluginAliases,
     },
-    ipc::{ClientAttributes, ExitReason, ServerToClientMsg},
+    ipc::{ClientAttributes, ExitReason, ServerToClientMsg, VerijPaneRequest, VerijPaneResult},
     shared::{default_palette, web_server_base_url},
 };
 
 pub type ClientId = u16;
+
+#[cfg(test)]
+mod verij_bridge_tests;
 
 /// Instructions related to server-side application
 #[derive(Debug, Clone)]
@@ -105,6 +109,10 @@ pub enum ServerInstruction {
     ),
     AttachWatcherClient(ClientId, Size, bool), // bool -> is_web_client
     ConnStatus(ClientId),
+    VerijRequestIdentity(ClientId),
+    VerijFocusPane(ClientId, ClientId, String, u32),
+    VerijPaneRequest(ClientId, VerijPaneRequest),
+    VerijPaneResult(ClientId, String, VerijPaneResult),
     Log(Vec<String>, ClientId, Option<NotificationEnd>),
     LogError(Vec<String>, ClientId, Option<NotificationEnd>),
     SwitchSession(ConnectToSession, ClientId, Option<NotificationEnd>),
@@ -159,6 +167,11 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::AttachClient(..) => ServerContext::AttachClient,
             ServerInstruction::AttachWatcherClient(..) => ServerContext::AttachClient,
             ServerInstruction::ConnStatus(..) => ServerContext::ConnStatus,
+            ServerInstruction::VerijRequestIdentity(..) => ServerContext::ConnStatus,
+            ServerInstruction::VerijFocusPane(..) => ServerContext::ConnStatus,
+            ServerInstruction::VerijPaneRequest(..) | ServerInstruction::VerijPaneResult(..) => {
+                ServerContext::ConnStatus
+            },
             ServerInstruction::Log(..) => ServerContext::Log,
             ServerInstruction::LogError(..) => ServerContext::LogError,
             ServerInstruction::SwitchSession(..) => ServerContext::SwitchSession,
@@ -629,6 +642,8 @@ macro_rules! send_to_client {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SessionState {
+    attachment_generations: HashMap<ClientId, String>,
+    verij_navigation_sequences: HashMap<ClientId, u64>,
     clients: HashMap<ClientId, Option<(Size, bool)>>, // bool -> is_web_client
     pipes: HashMap<String, ClientId>,                 // String => pipe_id
     watchers: HashMap<ClientId, bool>, // watcher clients (read-only observers) bool -> is_web_client
@@ -645,6 +660,8 @@ pub(crate) struct SessionState {
 impl SessionState {
     pub fn new() -> Self {
         SessionState {
+            attachment_generations: HashMap::new(),
+            verij_navigation_sequences: HashMap::new(),
             clients: HashMap::new(),
             pipes: HashMap::new(),
             watchers: HashMap::new(),
@@ -669,10 +686,21 @@ impl SessionState {
             }
         }
         self.clients.insert(next_client_id, None);
+        // Reset request ordering whenever any prior kind of socket ID is reused.
+        self.verij_navigation_sequences.remove(&next_client_id);
+        self.attachment_generations
+            .insert(next_client_id, uuid::Uuid::new_v4().to_string());
         next_client_id
     }
     pub fn associate_pipe_with_client(&mut self, pipe_id: String, client_id: ClientId) {
         self.pipes.insert(pipe_id, client_id);
+    }
+    fn verij_identity(&self, client_id: ClientId) -> Option<&String> {
+        if matches!(self.clients.get(&client_id), Some(Some((_, false)))) {
+            self.attachment_generations.get(&client_id)
+        } else {
+            None
+        }
     }
     /// Remove a client and return any host-query tokens that had
     /// been dispatched to this client and were still awaiting a
@@ -681,6 +709,8 @@ impl SessionState {
     /// `Screen`'s in-flight slot releases and any queued forwards
     /// can proceed.
     pub fn remove_client(&mut self, client_id: ClientId) -> Vec<u32> {
+        self.attachment_generations.remove(&client_id);
+        self.verij_navigation_sequences.remove(&client_id);
         self.clients.remove(&client_id);
         self.pipes.retain(|_p_id, c_id| c_id != &client_id);
         self.clear_last_active_client(client_id);
@@ -1617,6 +1647,133 @@ pub fn start_server_impl(
             ServerInstruction::ConnStatus(client_id) => {
                 let _ = os_input.send_to_client(client_id, ServerToClientMsg::Connected);
                 remove_client!(client_id, os_input, session_state, session_data);
+            },
+            ServerInstruction::VerijRequestIdentity(client_id) => {
+                let state = session_state.read().unwrap();
+                if let Some(connection_id) = state.verij_identity(client_id) {
+                    if let Some(data) = session_data.read().unwrap().as_ref() {
+                        let _ = data.senders.send_to_screen(
+                            ScreenInstruction::VerijSetClientGeneration(
+                                client_id,
+                                connection_id.clone(),
+                            ),
+                        );
+                    }
+                    let _ = os_input.send_to_client(
+                        client_id,
+                        ServerToClientMsg::VerijAttachmentIdentity {
+                            client_id,
+                            connection_id: connection_id.clone(),
+                            server_pid: std::process::id(),
+                        },
+                    );
+                }
+            },
+            ServerInstruction::VerijFocusPane(requester, target, generation, pane_id) => {
+                let state = session_state.read().unwrap();
+                let bound = state.verij_identity(target) == Some(&generation);
+                let accepted = bound
+                    && session_data
+                        .read()
+                        .unwrap()
+                        .as_ref()
+                        .map(|data| {
+                            data.senders
+                                .send_to_screen(ScreenInstruction::VerijFocusPane(
+                                    PaneId::Terminal(pane_id),
+                                    target,
+                                    generation.clone(),
+                                ))
+                                .is_ok()
+                        })
+                        .unwrap_or(false);
+                // Receipt is not effective-focus confirmation. The caller must
+                // observe the addressed display client after dispatch.
+                let _ = os_input.send_to_client(
+                    requester,
+                    ServerToClientMsg::Log {
+                        lines: vec![if accepted {
+                            "verij:accepted"
+                        } else {
+                            "verij:rejected"
+                        }
+                        .to_owned()],
+                    },
+                );
+                drop(state);
+                let _ = os_input.send_to_client(
+                    requester,
+                    ServerToClientMsg::Exit {
+                        exit_reason: ExitReason::Normal,
+                    },
+                );
+                remove_client!(requester, os_input, session_state, session_data);
+            },
+            ServerInstruction::VerijPaneRequest(requester, request) => {
+                // Completion connections are CLI-only, never disconnect a display
+                // that accidentally sends a control request on its own socket.
+                let (requester_generation, failure) = {
+                    let mut state = session_state.write().unwrap();
+                    if state.clients.get(&requester) != Some(&None) {
+                        continue;
+                    }
+                    let requester_generation = state.attachment_generations[&requester].clone();
+                    let failure = state.verij_reserve(&request).err();
+                    (requester_generation, failure)
+                };
+                let failure = failure.or_else(|| {
+                    let queued = session_data
+                        .read()
+                        .unwrap()
+                        .as_ref()
+                        .map(|data| {
+                            data.senders
+                                .send_to_screen(ScreenInstruction::VerijPaneRequest(
+                                    screen::VerijPaneTask {
+                                        requester,
+                                        requester_generation: requester_generation.clone(),
+                                        request: request.clone(),
+                                        state: session_state.clone(),
+                                    },
+                                ))
+                                .is_ok()
+                        })
+                        .unwrap_or(false);
+                    (!queued).then_some("unavailable")
+                });
+                if let Some(status) = failure {
+                    let _ = os_input.send_to_client(
+                        requester,
+                        ServerToClientMsg::VerijPaneResult(VerijPaneResult::new(request, status)),
+                    );
+                    let _ = os_input.send_to_client(
+                        requester,
+                        ServerToClientMsg::Exit {
+                            exit_reason: ExitReason::Normal,
+                        },
+                    );
+                    // Route EOF owns removal after the helper reads its result.
+                }
+            },
+            ServerInstruction::VerijPaneResult(requester, requester_generation, mut result) => {
+                let state = session_state.read().unwrap();
+                // Numeric control-client IDs can also be reused while queued.
+                if !state.verij_validate_requester(requester, &requester_generation) {
+                    continue;
+                }
+                if let Err(status) = state.verij_validate_execution(&result.request) {
+                    result = VerijPaneResult::new(result.request, status);
+                }
+                let _ =
+                    os_input.send_to_client(requester, ServerToClientMsg::VerijPaneResult(result));
+                let _ = os_input.send_to_client(
+                    requester,
+                    ServerToClientMsg::Exit {
+                        exit_reason: ExitReason::Normal,
+                    },
+                );
+                drop(state);
+                // Route EOF owns removal; do not close before result delivery.
             },
             ServerInstruction::Log(
                 lines_to_log,

@@ -7,6 +7,7 @@ mod os_input_output_unix;
 #[path = "os_input_output_windows.rs"]
 mod os_input_output_windows;
 
+mod attachment_identity;
 pub mod cli_client;
 mod command_is_executing;
 mod input_handler;
@@ -181,6 +182,11 @@ pub(crate) enum ClientInstruction {
     UnblockInputThread,
     Exit(ExitReason),
     Connected,
+    VerijAttachmentIdentity {
+        client_id: ClientId,
+        connection_id: String,
+        server_pid: u32,
+    },
     Log(Vec<String>),
     LogError(Vec<String>),
     SwitchSession(ConnectToSession),
@@ -209,6 +215,15 @@ impl From<ServerToClientMsg> for ClientInstruction {
             ServerToClientMsg::Render { content } => ClientInstruction::Render(content),
             ServerToClientMsg::UnblockInputThread => ClientInstruction::UnblockInputThread,
             ServerToClientMsg::Connected => ClientInstruction::Connected,
+            ServerToClientMsg::VerijAttachmentIdentity {
+                client_id,
+                connection_id,
+                server_pid,
+            } => ClientInstruction::VerijAttachmentIdentity {
+                client_id,
+                connection_id,
+                server_pid,
+            },
             ServerToClientMsg::Log { lines } => ClientInstruction::Log(lines),
             ServerToClientMsg::LogError { lines } => ClientInstruction::LogError(lines),
             ServerToClientMsg::SwitchSession { connect_to_session } => {
@@ -239,6 +254,7 @@ impl From<ServerToClientMsg> for ClientInstruction {
             ServerToClientMsg::SubscribedPaneClosed { .. } => ClientInstruction::UnblockInputThread,
             ServerToClientMsg::SetSoftKeyboard { .. } => ClientInstruction::UnblockInputThread,
             ServerToClientMsg::MobileState { .. } => ClientInstruction::UnblockInputThread,
+            ServerToClientMsg::VerijPaneResult(_) => ClientInstruction::UnblockInputThread,
         }
     }
 }
@@ -251,6 +267,7 @@ impl From<&ClientInstruction> for ClientContext {
             ClientInstruction::Render(_) => ClientContext::Render,
             ClientInstruction::UnblockInputThread => ClientContext::UnblockInputThread,
             ClientInstruction::Connected => ClientContext::Connected,
+            ClientInstruction::VerijAttachmentIdentity { .. } => ClientContext::Connected,
             ClientInstruction::Log(_) => ClientContext::Log,
             ClientInstruction::LogError(_) => ClientContext::LogError,
             ClientInstruction::SwitchSession(..) => ClientContext::SwitchSession,
@@ -1178,6 +1195,9 @@ pub fn start_client(
 
     os_input.connect_to_server(&*ipc_pipe);
     os_input.send_to_server(first_msg);
+    if std::env::var_os("VERIJ_ZELLIJ_IDENTITY_DIR").is_some() {
+        os_input.send_to_server(ClientToServerMsg::VerijRequestIdentity);
+    }
 
     let mut command_is_executing = CommandIsExecuting::new();
 
@@ -1390,6 +1410,7 @@ pub fn start_client(
     };
 
     let mut exit_msg = String::new();
+    let mut attachment_record = None;
     let mut synchronised_output = match os_input.env_variable("TERM").as_deref() {
         Some("alacritty") => Some(SyncOutput::DCS),
         _ => None,
@@ -1403,6 +1424,20 @@ pub fn start_client(
         err_ctx.add_call(ContextType::Client((&client_instruction).into()));
 
         match client_instruction {
+            ClientInstruction::VerijAttachmentIdentity {
+                client_id,
+                connection_id,
+                server_pid,
+            } => {
+                match attachment_identity::AttachmentRecord::publish(
+                    client_id,
+                    connection_id,
+                    server_pid,
+                ) {
+                    Ok(record) => attachment_record = Some(record),
+                    Err(error) => log::warn!("Could not publish attachment identity: {error}"),
+                }
+            },
             ClientInstruction::Exit(reason) => {
                 os_input.send_to_server(ClientToServerMsg::ClientExited);
 
@@ -1598,6 +1633,7 @@ pub fn start_client(
     }
 
     nested_reannounce.stop();
+    drop(attachment_record);
 
     router_thread.join().unwrap();
 

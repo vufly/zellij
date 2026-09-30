@@ -21,23 +21,70 @@ use crate::{
         SoftKeyboardVisibilityChangedMsg, StartWebServerMsg, SubscribeToPaneRendersMsg,
         SubscribedPaneClosedMsg, SwitchSessionMsg, TabMetadata as ProtoTabMetadata,
         TerminalPixelDimensionsMsg, TerminalResizeMsg, UnblockCliPipeInputMsg,
-        UnblockInputThreadMsg, WebServerStartedMsg,
+        UnblockInputThreadMsg, VerijAttachmentIdentityMsg, VerijFocusPaneMsg, VerijPaneRequestMsg,
+        VerijPaneResultMsg, VerijRequestIdentityMsg, WebServerStartedMsg,
     },
     data::{HostTerminalThemeMode, InputMode, PaneId},
     errors::prelude::*,
     ipc::{
         ClientToServerMsg, ColorRegister, ExitReason, MobileActivePanePayload, MobilePanePayload,
         MobileRenderPrefsPayload, MobileSessionPayload, MobileSizePayload, MobileStatePayload,
-        MobileTabPayload, PaneReference, PixelDimensions, ServerToClientMsg,
+        MobileTabPayload, PaneReference, PixelDimensions, ServerToClientMsg, VerijPaneRequest,
+        VerijPaneResult,
     },
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 // Convert Rust ClientToServerMsg to protobuf
+impl From<VerijPaneRequest> for VerijPaneRequestMsg {
+    fn from(request: VerijPaneRequest) -> Self {
+        Self {
+            request_id: request.request_id,
+            target_client_id: u32::from(request.target_client_id),
+            connection_id: request.connection_id,
+            pane_id: request.pane_id,
+            sequence: request.sequence,
+            query_only: request.query_only,
+        }
+    }
+}
+
+impl TryFrom<VerijPaneRequestMsg> for VerijPaneRequest {
+    type Error = anyhow::Error;
+    fn try_from(request: VerijPaneRequestMsg) -> Result<Self, Self::Error> {
+        Ok(Self {
+            request_id: request.request_id,
+            target_client_id: request
+                .target_client_id
+                .try_into()
+                .map_err(|_| anyhow!("Invalid client ID"))?,
+            connection_id: request.connection_id,
+            pane_id: request.pane_id,
+            sequence: request.sequence,
+            query_only: request.query_only,
+        })
+    }
+}
+
 impl From<ClientToServerMsg> for ProtoClientToServerMsg {
     fn from(msg: ClientToServerMsg) -> Self {
         let message = match msg {
+            ClientToServerMsg::VerijPaneRequest(request) => {
+                client_to_server_msg::Message::VerijPaneRequest(request.into())
+            },
+            ClientToServerMsg::VerijRequestIdentity => {
+                client_to_server_msg::Message::VerijRequestIdentity(VerijRequestIdentityMsg {})
+            },
+            ClientToServerMsg::VerijFocusPane {
+                target_client_id,
+                connection_id,
+                pane_id,
+            } => client_to_server_msg::Message::VerijFocusPane(VerijFocusPaneMsg {
+                target_client_id: u32::from(target_client_id),
+                connection_id,
+                pane_id,
+            }),
             ClientToServerMsg::DetachSession { client_ids } => {
                 client_to_server_msg::Message::DetachSession(DetachSessionMsg {
                     client_ids: client_ids.into_iter().map(|id| id as u32).collect(),
@@ -362,6 +409,22 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                 })
             },
             None => Err(anyhow!("Empty ClientToServerMsg message")),
+            Some(client_to_server_msg::Message::VerijRequestIdentity(_)) => {
+                Ok(ClientToServerMsg::VerijRequestIdentity)
+            },
+            Some(client_to_server_msg::Message::VerijPaneRequest(request)) => {
+                Ok(ClientToServerMsg::VerijPaneRequest(request.try_into()?))
+            },
+            Some(client_to_server_msg::Message::VerijFocusPane(msg)) => {
+                Ok(ClientToServerMsg::VerijFocusPane {
+                    target_client_id: msg
+                        .target_client_id
+                        .try_into()
+                        .map_err(|_| anyhow!("Invalid client ID"))?,
+                    connection_id: msg.connection_id,
+                    pane_id: msg.pane_id,
+                })
+            },
         }
     }
 }
@@ -391,6 +454,27 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
             },
             ServerToClientMsg::Connected => {
                 server_to_client_msg::Message::Connected(ConnectedMsg {})
+            },
+            ServerToClientMsg::VerijAttachmentIdentity {
+                client_id,
+                connection_id,
+                server_pid,
+            } => {
+                server_to_client_msg::Message::VerijAttachmentIdentity(VerijAttachmentIdentityMsg {
+                    client_id: u32::from(client_id),
+                    connection_id,
+                    server_pid,
+                })
+            },
+            ServerToClientMsg::VerijPaneResult(result) => {
+                server_to_client_msg::Message::VerijPaneResult(VerijPaneResultMsg {
+                    request: Some(result.request.into()),
+                    status: result.status,
+                    focused_pane_id: result.focused_pane_id,
+                    focused_is_plugin: result.focused_is_plugin,
+                    tab_id: result.tab_id,
+                    server_pid: result.server_pid,
+                })
             },
             ServerToClientMsg::Log { lines } => {
                 server_to_client_msg::Message::Log(LogMsg { lines })
@@ -623,6 +707,29 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
                 Ok(ServerToClientMsg::Exit { exit_reason })
             },
             Some(server_to_client_msg::Message::Connected(_)) => Ok(ServerToClientMsg::Connected),
+            Some(server_to_client_msg::Message::VerijAttachmentIdentity(msg)) => {
+                Ok(ServerToClientMsg::VerijAttachmentIdentity {
+                    client_id: msg
+                        .client_id
+                        .try_into()
+                        .map_err(|_| anyhow!("Invalid client ID"))?,
+                    connection_id: msg.connection_id,
+                    server_pid: msg.server_pid,
+                })
+            },
+            Some(server_to_client_msg::Message::VerijPaneResult(msg)) => {
+                Ok(ServerToClientMsg::VerijPaneResult(VerijPaneResult {
+                    request: msg
+                        .request
+                        .ok_or_else(|| anyhow!("Missing bridge request"))?
+                        .try_into()?,
+                    status: msg.status,
+                    focused_pane_id: msg.focused_pane_id,
+                    focused_is_plugin: msg.focused_is_plugin,
+                    tab_id: msg.tab_id,
+                    server_pid: msg.server_pid,
+                }))
+            },
             Some(server_to_client_msg::Message::Log(log)) => {
                 Ok(ServerToClientMsg::Log { lines: log.lines })
             },
