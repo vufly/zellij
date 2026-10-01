@@ -474,6 +474,7 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
                     focused_is_plugin: result.focused_is_plugin,
                     tab_id: result.tab_id,
                     server_pid: result.server_pid,
+                    latest_sequence: result.latest_sequence,
                 })
             },
             ServerToClientMsg::Log { lines } => {
@@ -728,6 +729,7 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
                     focused_is_plugin: msg.focused_is_plugin,
                     tab_id: msg.tab_id,
                     server_pid: msg.server_pid,
+                    latest_sequence: msg.latest_sequence,
                 }))
             },
             Some(server_to_client_msg::Message::Log(log)) => {

@@ -63,12 +63,14 @@ fn verij_queued_requests_supersede_and_do_not_cross_attachment_reuse() {
         sequence: 1,
         query_only: false,
     };
+    assert_eq!(state.verij_latest_sequence(&first), Some(0));
     state.verij_reserve(&first).unwrap();
     let mut latest = first.clone();
     latest.request_id = "latest".into();
     latest.pane_id = 1;
     latest.sequence = 2;
     state.verij_reserve(&latest).unwrap();
+    assert_eq!(state.verij_latest_sequence(&first), Some(2));
     assert_eq!(state.verij_validate_execution(&first), Err("superseded"));
     assert_eq!(state.verij_reserve(&first), Err("superseded"));
     assert_eq!(state.verij_validate_execution(&latest), Ok(()));
@@ -76,12 +78,14 @@ fn verij_queued_requests_supersede_and_do_not_cross_attachment_reuse() {
     query.query_only = true;
     query.sequence = 0;
     state.verij_reserve(&query).unwrap();
+    assert_eq!(state.verij_latest_sequence(&query), Some(2));
     assert_eq!(
         state.verij_validate_execution(&latest),
         Ok(()),
         "query must not cancel focus"
     );
     state.remove_client(id);
+    assert_eq!(state.verij_latest_sequence(&latest), None);
     assert_eq!(
         state.verij_validate_execution(&latest),
         Err("stale_attachment")
@@ -102,6 +106,7 @@ fn verij_queued_requests_supersede_and_do_not_cross_attachment_reuse() {
     );
     let mut replacement = first;
     replacement.connection_id = state.verij_identity(id).unwrap().clone();
+    assert_eq!(state.verij_latest_sequence(&replacement), Some(0));
     state.verij_reserve(&replacement).unwrap();
     assert_eq!(
         state.verij_validate_execution(&replacement),

@@ -3175,6 +3175,8 @@ pub struct VerijPaneResultMsg {
     pub tab_id: ::core::option::Option<u64>,
     #[prost(uint32, tag="6")]
     pub server_pid: u32,
+    #[prost(uint64, optional, tag="7")]
+    pub latest_sequence: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct VerijFocusPaneMsg {

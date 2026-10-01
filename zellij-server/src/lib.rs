@@ -97,6 +97,7 @@ pub enum ServerInstruction {
     UnblockInputThread,
     ClientExit(ClientId, Option<NotificationEnd>),
     RemoveClient(ClientId),
+    RemoveClientIfGeneration(ClientId, String),
     Error(String),
     KillSession,
     DetachSession(Vec<ClientId>, Option<NotificationEnd>),
@@ -160,7 +161,8 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::Render(..) => ServerContext::Render,
             ServerInstruction::UnblockInputThread => ServerContext::UnblockInputThread,
             ServerInstruction::ClientExit(..) => ServerContext::ClientExit,
-            ServerInstruction::RemoveClient(..) => ServerContext::RemoveClient,
+            ServerInstruction::RemoveClient(..)
+            | ServerInstruction::RemoveClientIfGeneration(..) => ServerContext::RemoveClient,
             ServerInstruction::Error(_) => ServerContext::Error,
             ServerInstruction::KillSession => ServerContext::KillSession,
             ServerInstruction::DetachSession(..) => ServerContext::DetachSession,
@@ -690,6 +692,10 @@ impl SessionState {
         self.verij_navigation_sequences.remove(&next_client_id);
         self.attachment_generations
             .insert(next_client_id, uuid::Uuid::new_v4().to_string());
+        verij_bridge::verij_probe_event(
+            &format!("allocated-{}", self.attachment_generations[&next_client_id]),
+            serde_json::json!({"client_id": next_client_id}),
+        );
         next_client_id
     }
     pub fn associate_pipe_with_client(&mut self, pipe_id: String, client_id: ClientId) {
@@ -709,9 +715,15 @@ impl SessionState {
     /// `Screen`'s in-flight slot releases and any queued forwards
     /// can proceed.
     pub fn remove_client(&mut self, client_id: ClientId) -> Vec<u32> {
-        self.attachment_generations.remove(&client_id);
+        let generation = self.attachment_generations.remove(&client_id);
         self.verij_navigation_sequences.remove(&client_id);
         self.clients.remove(&client_id);
+        if let Some(generation) = generation {
+            verij_bridge::verij_probe_event(
+                &format!("removed-{generation}"),
+                serde_json::json!({"client_id": client_id, "generation": generation}),
+            );
+        }
         self.pipes.retain(|_p_id, c_id| c_id != &client_id);
         self.clear_last_active_client(client_id);
         let stuck: Vec<u32> = self
@@ -1464,7 +1476,23 @@ pub fn start_server_impl(
                     }
                 }
             },
-            ServerInstruction::RemoveClient(client_id) => {
+            ServerInstruction::RemoveClient(client_id)
+            | ServerInstruction::RemoveClientIfGeneration(client_id, _) => {
+                if let ServerInstruction::RemoveClientIfGeneration(_, generation) = &instruction {
+                    if session_state
+                        .read()
+                        .unwrap()
+                        .attachment_generations
+                        .get(&client_id)
+                        != Some(generation)
+                    {
+                        verij_bridge::verij_probe_event(
+                            &format!("cleanup-skipped-{generation}"),
+                            serde_json::json!({"client_id": client_id}),
+                        );
+                        continue;
+                    }
+                }
                 // Check if this is a watcher
                 let is_watcher = session_state.read().unwrap().is_watcher(&client_id);
                 if is_watcher {
@@ -1671,7 +1699,17 @@ pub fn start_server_impl(
             },
             ServerInstruction::VerijFocusPane(requester, target, generation, pane_id) => {
                 let state = session_state.read().unwrap();
+                if state.clients.get(&requester) != Some(&None) {
+                    continue;
+                }
                 let bound = state.verij_identity(target) == Some(&generation);
+                let requester_generation = state.attachment_generations.get(&requester).cloned();
+                if let Some(requester_generation) = &requester_generation {
+                    verij_bridge::verij_probe_event(
+                        &format!("legacy-{requester_generation}.dispatch"),
+                        serde_json::json!({"requester": requester, "target": target, "bound": bound}),
+                    );
+                }
                 let accepted = bound
                     && session_data
                         .read()
@@ -1689,7 +1727,7 @@ pub fn start_server_impl(
                         .unwrap_or(false);
                 // Receipt is not effective-focus confirmation. The caller must
                 // observe the addressed display client after dispatch.
-                let _ = os_input.send_to_client(
+                let sent = os_input.send_to_client(
                     requester,
                     ServerToClientMsg::Log {
                         lines: vec![if accepted {
@@ -1700,6 +1738,12 @@ pub fn start_server_impl(
                         .to_owned()],
                     },
                 );
+                if let Some(requester_generation) = &requester_generation {
+                    verij_bridge::verij_probe_event(
+                        &format!("legacy-{requester_generation}.buffered"),
+                        serde_json::json!({"requester": requester, "ok": sent.is_ok()}),
+                    );
+                }
                 drop(state);
                 let _ = os_input.send_to_client(
                     requester,
@@ -1707,7 +1751,7 @@ pub fn start_server_impl(
                         exit_reason: ExitReason::Normal,
                     },
                 );
-                remove_client!(requester, os_input, session_state, session_data);
+                // The still-open route owns cleanup after the helper closes.
             },
             ServerInstruction::VerijPaneRequest(requester, request) => {
                 // Completion connections are CLI-only, never disconnect a display
@@ -1741,11 +1785,19 @@ pub fn start_server_impl(
                         .unwrap_or(false);
                     (!queued).then_some("unavailable")
                 });
+                verij_bridge::verij_probe_event(
+                    &format!("{}.queued", request.request_id),
+                    serde_json::json!({"requester": requester, "requester_generation": requester_generation,
+                        "request": request, "failure": failure}),
+                );
                 if let Some(status) = failure {
-                    let _ = os_input.send_to_client(
-                        requester,
-                        ServerToClientMsg::VerijPaneResult(VerijPaneResult::new(request, status)),
-                    );
+                    let mut result = VerijPaneResult::new(request, status);
+                    result.latest_sequence = session_state
+                        .read()
+                        .unwrap()
+                        .verij_latest_sequence(&result.request);
+                    let _ = os_input
+                        .send_to_client(requester, ServerToClientMsg::VerijPaneResult(result));
                     let _ = os_input.send_to_client(
                         requester,
                         ServerToClientMsg::Exit {
@@ -1764,6 +1816,11 @@ pub fn start_server_impl(
                 if let Err(status) = state.verij_validate_execution(&result.request) {
                     result = VerijPaneResult::new(result.request, status);
                 }
+                result.latest_sequence = state.verij_latest_sequence(&result.request);
+                verij_bridge::verij_probe_event(
+                    &format!("{}.delivered", result.request.request_id),
+                    serde_json::json!({"result": result}),
+                );
                 let _ =
                     os_input.send_to_client(requester, ServerToClientMsg::VerijPaneResult(result));
                 let _ = os_input.send_to_client(

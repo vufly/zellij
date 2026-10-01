@@ -89,6 +89,7 @@ fn verij_completion_wire_roundtrip_preserves_zero_focus_and_correlation() {
         let mut result = VerijPaneResult::new(request.clone(), "focused");
         result.focused_pane_id = observation;
         result.tab_id = observation.map(u64::from);
+        result.latest_sequence = observation.map(|_| u64::MAX);
         let original = ServerToClientMsg::VerijPaneResult(result);
         let wire = ProtoServer::from(original.clone()).encode_to_vec();
         let decoded: ServerToClientMsg = ProtoServer::decode(wire.as_slice())
@@ -97,7 +98,7 @@ fn verij_completion_wire_roundtrip_preserves_zero_focus_and_correlation() {
             .unwrap();
         assert_eq!(
             original, decoded,
-            "absent and zero IDs must remain distinct"
+            "absent/zero IDs and the u64 reservation watermark must survive"
         );
     }
 }

@@ -11246,6 +11246,7 @@ pub(crate) fn screen_thread_main(
                 request,
                 state,
             }) => {
+                let probe_ready = crate::verij_bridge::verij_probe_barrier(&request, "execute");
                 let result = {
                     // Recheck the live registry at execution start. Release its
                     // lock before native focus: cross-tab focus can send Render
@@ -11254,7 +11255,10 @@ pub(crate) fn screen_thread_main(
                     // a later reservation is rechecked at result delivery.
                     let validation = {
                         let state = state.read().unwrap();
-                        if !state.verij_validate_requester(requester, &requester_generation) {
+                        if !probe_ready {
+                            Err("unavailable")
+                        } else if !state.verij_validate_requester(requester, &requester_generation)
+                        {
                             Err("cancelled")
                         } else {
                             state.verij_validate_execution(&request)
@@ -11308,6 +11312,14 @@ pub(crate) fn screen_thread_main(
                     }
                     result
                 };
+                crate::verij_bridge::verij_probe_event(
+                    &format!("{}.executed", request.request_id),
+                    serde_json::json!({"requester": requester, "requester_generation": requester_generation,
+                        "result": result}),
+                );
+                if !crate::verij_bridge::verij_probe_barrier(&request, "result") {
+                    continue;
+                }
                 if !request.query_only && result.status == "focused" {
                     screen.clear_bell_for_pane_id(
                         PaneId::Terminal(request.pane_id),

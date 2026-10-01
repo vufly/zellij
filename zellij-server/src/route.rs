@@ -2258,6 +2258,12 @@ pub(crate) fn route_thread_main(
     mut receiver: IpcReceiverWithContext<ClientToServerMsg>,
     client_id: ClientId,
 ) -> Result<()> {
+    let route_generation = session_state
+        .read()
+        .unwrap()
+        .attachment_generations
+        .get(&client_id)
+        .cloned();
     let mut retry_queue = VecDeque::new();
     let err_context = || format!("failed to handle instruction for client {client_id}");
     let mut seen_cli_pipes = HashSet::new();
@@ -2674,7 +2680,9 @@ pub(crate) fn route_thread_main(
                             }
                         },
                         ClientToServerMsg::ClientExited => {
-                            let _ = to_server.send(ServerInstruction::RemoveClient(client_id));
+                            if let Some(generation) = &route_generation {
+                                let _ = to_server.send(ServerInstruction::RemoveClientIfGeneration(client_id, generation.clone()));
+                            }
                             return Ok(true);
                         },
                         ClientToServerMsg::KillSession => {
@@ -2691,7 +2699,8 @@ pub(crate) fn route_thread_main(
                         },
                         ClientToServerMsg::VerijFocusPane { target_client_id, connection_id, pane_id } => {
                             to_server.send(ServerInstruction::VerijFocusPane(client_id, target_client_id, connection_id, pane_id)).with_context(err_context)?;
-                            should_break = true;
+                            // Server receipt is asynchronous; retain the route
+                            // until the helper receives its reply and closes.
                         },
                         ClientToServerMsg::VerijPaneRequest(request) => {
                             to_server.send(ServerInstruction::VerijPaneRequest(client_id, request)).with_context(err_context)?;
@@ -2939,7 +2948,12 @@ pub(crate) fn route_thread_main(
                             exit_reason: ExitReason::Error("Received empty message".to_string()),
                         },
                     );
-                    let _ = to_server.send(ServerInstruction::RemoveClient(client_id));
+                    if let Some(generation) = &route_generation {
+                        let _ = to_server.send(ServerInstruction::RemoveClientIfGeneration(
+                            client_id,
+                            generation.clone(),
+                        ));
+                    }
                     break 'route_loop;
                 }
             },
@@ -2951,7 +2965,19 @@ pub(crate) fn route_thread_main(
         let _ = os_input.send_to_client(client_id, ServerToClientMsg::UnblockInputThread);
     }
     // route thread exited, make sure we clean up
-    let _ = to_server.send(ServerInstruction::RemoveClient(client_id));
+    if let Some(generation) = &route_generation {
+        crate::verij_bridge::verij_probe_route_end(generation);
+        crate::verij_bridge::verij_probe_event(
+            &format!("route-ended-{generation}"),
+            serde_json::json!({"client_id": client_id,
+                "current_generation": session_state.read().unwrap().attachment_generations.get(&client_id)}),
+        );
+    }
+    if let Some(generation) = route_generation {
+        let _ = to_server.send(ServerInstruction::RemoveClientIfGeneration(
+            client_id, generation,
+        ));
+    }
     Ok(())
 }
 

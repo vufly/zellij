@@ -47,6 +47,7 @@ message VerijPaneResultMsg {
   bool focused_is_plugin = 4;
   optional uint64 tab_id = 5;
   uint32 server_pid = 6;
+  optional uint64 latest_sequence = 7;
 }
 
 message UnblockInputThreadMsg {

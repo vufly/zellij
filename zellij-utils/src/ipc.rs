@@ -274,6 +274,8 @@ pub struct VerijPaneResult {
     pub focused_is_plugin: bool,
     pub tab_id: Option<u64>,
     pub server_pid: u32,
+    /// Server reservation watermark at delivery, present only for a live generation.
+    pub latest_sequence: Option<u64>,
 }
 
 impl VerijPaneResult {
@@ -285,6 +287,7 @@ impl VerijPaneResult {
             focused_is_plugin: false,
             tab_id: None,
             server_pid: std::process::id(),
+            latest_sequence: None,
         }
     }
 }

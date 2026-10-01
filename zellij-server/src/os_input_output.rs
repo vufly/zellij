@@ -233,10 +233,25 @@ impl ClientSender {
         std::thread::spawn(move || {
             let err_context = || format!("failed to send message to client {client_id}");
             for msg in client_buffer_receiver.iter() {
-                sender
-                    .send_server_msg(msg)
-                    .with_context(err_context)
-                    .non_fatal();
+                let probe_name = match &msg {
+                    ServerToClientMsg::VerijPaneResult(result) => {
+                        Some(format!("{}.wire", result.request.request_id))
+                    },
+                    ServerToClientMsg::Log { lines }
+                        if lines.iter().any(|line| line.starts_with("verij:")) =>
+                    {
+                        Some(format!("legacy-wire-{client_id}"))
+                    },
+                    _ => None,
+                };
+                let sent = sender.send_server_msg(msg).with_context(err_context);
+                if let Some(name) = probe_name {
+                    crate::verij_bridge::verij_probe_event(
+                        &name,
+                        serde_json::json!({"client_id": client_id, "ok": sent.is_ok(), "error": sent.as_ref().err().map(ToString::to_string)}),
+                    );
+                }
+                sent.non_fatal();
             }
             let _ = sender.send_server_msg(ServerToClientMsg::Exit {
                 exit_reason: ExitReason::Disconnect,
